@@ -1,143 +1,122 @@
 import express from "express";
-import axios from "axios";
-import TelegramBot from "node-telegram-bot-api";
+import bodyParser from "body-parser";
 import dotenv from "dotenv";
+import TelegramBot from "node-telegram-bot-api";
 
 dotenv.config();
 const app = express();
-app.use(express.json());
+const PORT = process.env.PORT || 10000;
 
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+app.use(bodyParser.json());
+
+// Telegram bot inicializálása
+const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
 const ADMIN_ID = process.env.ADMIN_ID;
-const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
-
-// ---- Alap beállítások ----
-let postingEnabled = true;
-let minSol = 0.01;
-let maxSol = 100;
+// Bot beállítások (dinamikusan változtathatók)
+let postEnabled = true;
+let minBurnedSol = 0.01;
+let maxBurnedSol = 100;
 let minMcap = 0;
-let maxMcap = 1_000_000_000;
+let maxMcap = Infinity;
 
-// ---- BirdEye API ----
-async function getTokenData(mint) {
-  try {
-    const url = `https://public-api.birdeye.so/public/token?address=${mint}&chain=solana`;
-    const response = await axios.get(url, {
-      headers: { "X-API-KEY": process.env.BIRDEYE_API_KEY },
-    });
-    return response.data.data;
-  } catch (e) {
-    console.error("❌ BirdEye API error:", e.message);
-    return null;
+// Admin parancsok kezelése privátban
+bot.on("message", async (msg) => {
+  const chatId = msg.chat.id;
+  const text = msg.text?.trim();
+
+  // Csak admin férhet hozzá
+  if (chatId.toString() !== ADMIN_ID) return;
+
+  if (text === "/status") {
+    return bot.sendMessage(chatId, `📊 *Bot státusz*:
+- Posztolás: ${postEnabled ? "✅ BE" : "⛔ KI"}
+- Minimum égetett SOL: ${minBurnedSol}
+- Maximum égetett SOL: ${maxBurnedSol}
+- Minimum MCAP: ${minMcap}
+- Maximum MCAP: ${maxMcap}`, { parse_mode: "Markdown" });
   }
-}
 
-// ---- Webhook feldolgozása ----
+  if (text.startsWith("/post")) {
+    const [, mode] = text.split(" ");
+    postEnabled = mode === "on";
+    return bot.sendMessage(chatId, `📢 Posztolás: ${postEnabled ? "✅ BE" : "⛔ KI"}`);
+  }
+
+  if (text.startsWith("/minsol")) {
+    minBurnedSol = parseFloat(text.split(" ")[1]) || 0;
+    return bot.sendMessage(chatId, `🔹 Minimum égetett SOL beállítva: ${minBurnedSol}`);
+  }
+
+  if (text.startsWith("/maxsol")) {
+    maxBurnedSol = parseFloat(text.split(" ")[1]) || Infinity;
+    return bot.sendMessage(chatId, `🔹 Maximum égetett SOL beállítva: ${maxBurnedSol}`);
+  }
+
+  if (text.startsWith("/mincap")) {
+    minMcap = parseFloat(text.split(" ")[1]) || 0;
+    return bot.sendMessage(chatId, `💎 Minimum MCAP beállítva: ${minMcap}`);
+  }
+
+  if (text.startsWith("/maxcap")) {
+    maxMcap = parseFloat(text.split(" ")[1]) || Infinity;
+    return bot.sendMessage(chatId, `💎 Maximum MCAP beállítva: ${maxMcap}`);
+  }
+});
+
+// Webhook végpont a Helius számára
 app.post("/webhook", async (req, res) => {
   try {
-    const data = req.body[0];
+    const events = req.body;
 
-    // Token adatok
-    const mint = data?.tokenTransfers?.[0]?.mint || null;
-    const solAmount = Number(data?.nativeTransfers?.[0]?.amount || 0) / 1e9;
-
-    if (!mint) {
-      console.log("⚠️ Nincs token mint a tranzakcióban");
-      return res.sendStatus(200);
+    if (!events || events.length === 0) {
+      return res.status(200).send("Nincs adat");
     }
 
-    // BirdEye adatlekérés
-    const tokenData = await getTokenData(mint);
+    for (const event of events) {
+      const accountData = event.accountData || {};
+      const tx = event.signature || "Ismeretlen tranzakció";
+      const burnedSol = parseFloat(accountData.amount || 0) / 1e9 || 0;
+      const marketCap = accountData.marketCap || null;
 
-    const tokenSymbol = tokenData?.symbol || "UNKNOWN";
-    const decimals = tokenData?.decimals || 9;
-    const marketCap = tokenData?.market_cap || null;
+      // Csak akkor posztolunk, ha a szűrőknek megfelel
+      if (
+        postEnabled &&
+        burnedSol >= minBurnedSol &&
+        burnedSol <= maxBurnedSol &&
+        (!marketCap || (marketCap >= minMcap && marketCap <= maxMcap))
+      ) {
+        const message = `
+🔥 *100% LP ELÉGETVE!* 🔥
 
-    const amount =
-      (data?.tokenTransfers?.[0]?.tokenAmount || 0) /
-      Math.pow(10, decimals);
+💰 Token: ${accountData.token || "UNKNOWN"}
+🔑 Mint: ${accountData.mint || "Ismeretlen"}
+🔥 Égetett tokens: ${accountData.tokenAmount || "?"}
+💎 SOL égetve: ${burnedSol} SOL
+📊 Market Cap: ${marketCap ? `$${marketCap}` : "N/A"}
+📅 Időpont: ${event.timestamp || "Ismeretlen"}
 
-    // Szűrés a beállítások alapján
-    if (
-      solAmount < minSol ||
-      solAmount > maxSol ||
-      (marketCap && (marketCap < minMcap || marketCap > maxMcap))
-    ) {
-      console.log("⏩ Tranzakció kiszűrve a beállítások alapján");
-      return res.sendStatus(200);
+🔗 Tranzakció: [Solscan](https://solscan.io/tx/${tx})
+
+🚀 Biztonságos memecoin lehet!
+⚠️ DYOR: Mindig végezz saját kutatást!
+        `;
+
+        await bot.sendMessage(process.env.TELEGRAM_CHANNEL_ID, message, {
+          parse_mode: "Markdown",
+          disable_web_page_preview: false,
+        });
+      }
     }
 
-    // Telegram üzenet küldése
-    if (postingEnabled) {
-      const msg = `
-🔥 100% LP ELÉGETVE! 🔥
-💎 Token: ${tokenSymbol}
-🔑 Mint: ${mint}
-🔥 Égetett mennyiség: ${amount} ${tokenSymbol}
-💰 Market Cap: ${marketCap ? `$${marketCap.toLocaleString()}` : "N/A"}
-💎 SOL égetve: ${solAmount} SOL
-📊 Tranzakció: [Solscan](https://solscan.io/tx/${data.signature})
-      `;
-
-      await bot.sendMessage(CHAT_ID, msg, { parse_mode: "Markdown" });
-    }
-
-    res.sendStatus(200);
+    return res.status(200).send("OK");
   } catch (err) {
-    console.error("Webhook feldolgozási hiba:", err.message);
-    res.sendStatus(500);
+    console.error("Webhook feldolgozási hiba:", err);
+    return res.status(500).send("Hiba");
   }
 });
 
-// ---- Admin parancsok privátban ----
-bot.onText(/\/status/, (msg) => {
-  if (msg.chat.id.toString() !== ADMIN_ID) return;
-  postingEnabled = !postingEnabled;
-  bot.sendMessage(ADMIN_ID, `🔄 Posztolás: ${postingEnabled ? "✅ BE" : "⛔ KI"}`);
+// Szerver indítása
+app.listen(PORT, () => {
+  console.log(`🚀 SLBB fut a ${PORT} porton - Webhook aktív: /webhook`);
 });
-
-bot.onText(/\/setminsol (.+)/, (msg, match) => {
-  if (msg.chat.id.toString() !== ADMIN_ID) return;
-  minSol = parseFloat(match[1]);
-  bot.sendMessage(ADMIN_ID, `🔹 Minimum SOL beállítva: ${minSol}`);
-});
-
-bot.onText(/\/setmaxsol (.+)/, (msg, match) => {
-  if (msg.chat.id.toString() !== ADMIN_ID) return;
-  maxSol = parseFloat(match[1]);
-  bot.sendMessage(ADMIN_ID, `🔹 Maximum SOL beállítva: ${maxSol}`);
-});
-
-bot.onText(/\/setminmcap (.+)/, (msg, match) => {
-  if (msg.chat.id.toString() !== ADMIN_ID) return;
-  minMcap = parseFloat(match[1]);
-  bot.sendMessage(ADMIN_ID, `🔹 Minimum MarketCap beállítva: ${minMcap}`);
-});
-
-bot.onText(/\/setmaxmcap (.+)/, (msg, match) => {
-  if (msg.chat.id.toString() !== ADMIN_ID) return;
-  maxMcap = parseFloat(match[1]);
-  bot.sendMessage(ADMIN_ID, `🔹 Maximum MarketCap beállítva: ${maxMcap}`);
-});
-
-bot.onText(/\/settings/, (msg) => {
-  if (msg.chat.id.toString() !== ADMIN_ID) return;
-  const message = `
-⚙️ **SLBB Bot Beállítások**
-🔄 Posztolás: ${postingEnabled ? "✅ BE" : "⛔ KI"}
-💎 Min SOL: ${minSol}
-💎 Max SOL: ${maxSol}
-💰 Min MarketCap: ${minMcap}
-💰 Max MarketCap: ${maxMcap}
-  `;
-  bot.sendMessage(ADMIN_ID, message, { parse_mode: "Markdown" });
-});
-
-// ---- Render port figyelés ----
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () =>
-  console.log(`🚀 SLBB fut a ${PORT} porton - Webhook aktív: /webhook`)
-);
