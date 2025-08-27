@@ -1,7 +1,7 @@
 {
   "name": "slbb",
-  "version": "2.1.0",
-  "description": "SLBB - Solana Liquidity Burn Bot with private Telegram admin control",
+  "version": "3.0.0",
+  "description": "SLBB - Solana Liquidity Burn Bot with BirdEye API, private Telegram admin control, and Helius Webhook integration",
   "type": "module",
   "main": "index.js",
   "scripts": {
@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "axios": "^1.7.4",
-    "dotenv": "^16.3.1",
+    "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "node-telegram-bot-api": "^0.61.0"
   }
